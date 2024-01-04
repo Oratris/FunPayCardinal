@@ -44,7 +44,13 @@ def get_tags() -> list[str] | None:
     :return: список тегов.
     """
     try:
-        return None
+        response = requests.get("https://github.com/Oratris/FunPayCardinal/tags/", headers=HEADERS)
+        if not response.status_code == 200:
+            logger.debug(f"Update status code is {response.status_code}!")
+            return None
+        json_response = response.json()
+        tags = [i.get("name") for i in json_response]
+        return tags or None
     except:
         logger.debug("TRACEBACK", exc_info=True)
         return None
@@ -80,7 +86,18 @@ def get_release(tag: str) -> Release | None:
     :return: данные релиза.
     """
     try:
-        return None
+        response = requests.get(f"https://github.com/Oratris/FunPayCardinal/tags/{tag}",
+                                headers=HEADERS)
+        if not response.status_code == 200:
+            logger.debug(f"Update status code is {response.status_code}!")
+            return None
+        json_response = response.json()
+        name = json_response.get("name")
+        description = json_response.get("body")
+        sources = json_response.get("zipball_url")
+        assets = json_response.get("assets")
+        exe = assets[0].get("browser_download_url")
+        return Release(name, description, sources, exe)
     except:
         logger.debug("TRACEBACK", exc_info=True)
         return None

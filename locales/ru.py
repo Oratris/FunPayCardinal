@@ -205,8 +205,8 @@ test_ad_key_created = """✅ Создан одноразовый ключ для
 <code>!автовыдача {}</code>"""
 
 about = """<b>🐦 FunPay Cardinal 🐦 v{}</b>\n
-<i>Telegram чат:</i> @funpay_cardinal
-<i>Разработчик:</i> @woopertail"""
+<i>Lolz:</i> https://zelenka.guru/threads/6160198/#post-43650791
+<i>Разработчик:</i> Oratris"""
 
 sys_info = """<b><u>Сводка данных</u></b>
 

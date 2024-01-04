@@ -1,8 +1,12 @@
 from __future__ import annotations
 from typing import TYPE_CHECKING
+
+import FunPayAPI.types
+from FunPayAPI.common.enums import MessageTypes, OrderStatuses
+from FunPayAPI.updater.events import NewMessageEvent
+
 if TYPE_CHECKING:
     from cardinal import Cardinal
-
 from telebot.types import InlineKeyboardMarkup as K, InlineKeyboardButton as B
 from tg_bot import CBT, static_keyboards as skb, utils
 from locales.localizer import Localizer
@@ -14,17 +18,17 @@ import time
 import json
 import os
 
-
 NAME = "Chat Sync Plugin"
-VERSION = "0.0.2"
+VERSION = "0.0.9"
 DESCRIPTION = "Плагин, синхронизирующий FunPay чаты с Telegram чатом (форумом).\n\nОтправляй сообщение в нужную тему - оно будет отправляться в нужный FunPay чат! И наоборот!"
-CREDITS = "@woopertail"
+CREDITS = "@woopertail, добавление иконок для встроенной автовыдачи FP, фиксы, обновы - @sidor0912"
 UUID = "745ed27e-3196-47c3-9483-e382c09fd2d8"
 SETTINGS_PAGE = True
 PLUGIN_FOLDER = f"storage/plugins/{UUID}/"
 
 SPECIAL_SYMBOL = "⁢"
 MIN_BOTS = 4
+BOT_DELAY = 4
 LOGGER_PREFIX = "[CHAT SYNC PLUGIN]"
 logger = getLogger("FPC.shat_sync")
 
@@ -74,9 +78,6 @@ def delete_chat_keyboard() -> K:
 class ChatSync:
     def __init__(self, crd: Cardinal):
         self.cardinal = crd
-        self.notification_last_stack_id = ""
-        self.attributation_last_stack_id = ""
-        self.sync_chats_running = False
         self.settings: dict | None = None
         self.threads: dict | None = None
         self.bots: list[telebot.TeleBot] | None = None
@@ -90,6 +91,10 @@ class ChatSync:
             self.tg = self.cardinal.telegram
             self.tgbot = self.tg.bot
 
+        self.notification_last_stack_id = ""
+        self.attributation_last_stack_id = ""
+        self.sync_chats_running = False
+        self.full_history_running = False
         self.init_chat_synced = False
 
         setattr(ChatSync.send_message, "plugin_uuid", UUID)
@@ -208,6 +213,13 @@ class ChatSync:
             self.threads[str(chat_id)] = topic.message_thread_id
             self.save_threads()
             logger.info(f"{LOGGER_PREFIX} FunPay чат $YELLOW{chat_name} (CID: {chat_id})$RESET связан с Telegram темой $YELLOW{topic.message_thread_id}$RESET.")
+            try:
+                self.current_bot.send_message(self.settings["chat_id"], f"<a href='https://funpay.com/chat/?node={chat_id}'>{chat_name}</a>", message_thread_id=topic.message_thread_id)
+                self.swap_curr_bot()
+            except:
+                logger.error(f"{LOGGER_PREFIX} Произошла ошибка при отправке первого сообщения при создании топика.")
+                logger.debug("TRACEBACK", exc_info=True)
+
             return True
         except:
             logger.error(f"{LOGGER_PREFIX} Произошла ошибка при связывании FunPay чата с Telegram темой.")
@@ -236,7 +248,7 @@ class ChatSync:
             return
         self.attributation_last_stack_id = e.stack.id()
         for event in e.stack.get_stack():
-            if event.message.text and SPECIAL_SYMBOL in event.message.text:
+            if event.message.text and event.message.text.startswith(SPECIAL_SYMBOL):
                 event.message.text = event.message.text.replace(SPECIAL_SYMBOL, "")
                 setattr(event, "sync_ignore", True)
 
@@ -268,13 +280,15 @@ class ChatSync:
         self.tg.msg_handler(self.sync_chats, commands=["sync_chats"])
         self.tg.msg_handler(self.watch_handler, commands=["watch"])
         self.tg.msg_handler(self.history_handler, commands=["history"])
+        self.tg.msg_handler(self.full_history_handler, commands=["full_history"])
 
         self.cardinal.add_telegram_commands(UUID, [
             ("setup_sync_chat", "Активировать группу для синхронизации", True),
             ("delete_sync_chat", "Деактивировать группу для синхронизации", True),
             ("sync_chats", "Ручная синхронизация чатов", True),
             ("watch", "Что сейчас смотрит пользователь?", True),
-            ("history", "Последние 25 сообщений чата", True)
+            ("history", "Последние 25 сообщений чата", True),
+            ("full_history", "Полная история чата", True)
         ])
 
     # new message
@@ -287,21 +301,87 @@ class ChatSync:
         events_list = [e for e in e.stack.get_stack() if not hasattr(e, "sync_ignore")]
         if not events_list:
             return
-
+        tags = " ".join([f"<a href='tg://user?id={i}'>{SPECIAL_SYMBOL}</a>" for i in c.telegram.authorized_users])
         thread_id = self.threads[str(chat_id)]
         text = ""
         last_message_author_id = -1
         last_by_bot = False
+        last_badge = None
+
         for i in events_list:
+            def edit_icon_and_topic_name(c: Cardinal, e: events.NewMessageEvent):
+                try:
+                    str4topic = ""
+                    if e.message.type not in (MessageTypes.REFUND, MessageTypes.PARTIAL_REFUND,
+                                              MessageTypes.ORDER_PURCHASED, MessageTypes.ORDER_CONFIRMED,
+                                              MessageTypes.ORDER_CONFIRMED_BY_ADMIN) :
+                        return
+                    else:
+                        logger.debug(f"{LOGGER_PREFIX} Сообщение прошло проверку на изменение иконки: {e.message.text}")
+                    sells = []
+                    start_from = None
+                    while (True):
+                        start_from, sells_temp = c.account.get_sells(buyer=chat_name, start_from=start_from)
+                        sells.extend(sells_temp)
+                        if start_from is None:
+                            break
+                        time.sleep(1)
+                    paid = 0
+                    refunded = 0
+                    closed = 0
+                    paid_sum = {}
+                    refunded_sum = {}
+                    closed_sum = {}
+                    for sale in sells:
+                        if sale.status == OrderStatuses.REFUNDED:
+                            refunded += 1
+                            refunded_sum[sale.currency] = refunded_sum.get(sale.currency, 0) + sale.price
+                        elif sale.status == OrderStatuses.PAID:
+                            paid += 1
+                            paid_sum[sale.currency] = paid_sum.get(sale.currency, 0) + sale.price
+                        elif sale.status == OrderStatuses.CLOSED:
+                            closed += 1
+                            closed_sum[sale.currency] = closed_sum.get(sale.currency, 0) + sale.price
+                    paid_sum = ", ".join(sorted([f"{v}{k}" for k, v in paid_sum.items()],key=lambda x: x[-1]))
+                    refunded_sum = ", ".join(sorted([f"{v}{k}" for k, v in refunded_sum.items()], key=lambda x: x[-1]))
+                    closed_sum = ", ".join(sorted([f"{v}{k}" for k, v in closed_sum.items()], key=lambda x: x[-1]))
+                    if paid:
+                        icon_custom_emoji_id = "5431492767249342908"
+                    elif closed:
+                        icon_custom_emoji_id = "5350452584119279096"
+                    elif refunded:
+                        icon_custom_emoji_id = "5312424913615723286"
+                    else:
+                        icon_custom_emoji_id = "5417915203100613993"
+                    str4topic = f"{paid}|{closed}|{refunded}👤{chat_name} ({chat_id})"
+                    self.current_bot.edit_forum_topic(name=str4topic,
+                                                      chat_id=self.settings["chat_id"], message_thread_id=thread_id,
+                                                      icon_custom_emoji_id=icon_custom_emoji_id)
+                    logger.debug(f"{LOGGER_PREFIX} Изменение иконки/названия чата {thread_id} на {str4topic} успешно.")
+                    self.swap_curr_bot()
+                    txt4tg = f"Статистика по пользователю <b>{chat_name}</b>\n\n" \
+                             f"<b>🛒Оплачен:</b> <code>{paid}</code> {'(<code>'+paid_sum+'</code>)' if paid_sum else ''}\n" \
+                             f"<b>🏁Закрыт:</b> <code>{closed}</code> {'(<code>'+closed_sum+'</code>)' if closed_sum else ''}\n" \
+                             f"<b>🔙Возврат:</b> <code>{refunded}</code> {'(<code>'+refunded_sum+'</code>)' if refunded_sum else ''}"
+                    self.current_bot.send_message(self.settings["chat_id"], txt4tg, message_thread_id=thread_id)
+                    self.swap_curr_bot()
+
+                except:
+                    logger.error(f"{LOGGER_PREFIX} Произошла ошибка при изменении иконки/названия чата {thread_id} на {str4topic}")
+                    logger.debug("TRACEBACK", exc_info=True)
+            edit_icon_and_topic_name(c, i)
             message_text = str(i.message)
-            if i.message.author_id == last_message_author_id and i.message.by_bot == last_by_bot:
+            if i.message.author_id == last_message_author_id and i.message.by_bot == last_by_bot \
+                    and i.message.badge == last_badge and text != "":
                 author = ""
             elif i.message.author_id == c.account.id:
                 author = f"<i><b>🤖 {_('you')} (<i>FPC</i>):</b></i> " if i.message.by_bot else f"<i><b>🫵 {_('you')}:</b></i> "
+                if i.message.badge:
+                    author = f"<i><b>📦 {_('you')} ({i.message.badge}):</b></i> "
             elif i.message.author_id == 0:
-                author = f"<i><b>🔵 {i.message.author}: </b></i>"
+                author = f"<i><b>🔵 {i.message.author}: </b></i>"                
             elif i.message.badge:
-                author = f"<i><b>🆘 {i.message.author} ({_('support')}): </b></i>"
+                author = f"<i><b>🆘 {i.message.author} ({i.message.badge}): </b></i>"
             elif i.message.author == i.message.chat_name:
                 author = f"<i><b>👤 {i.message.author}: </b></i>"
             else:
@@ -317,13 +397,25 @@ class ChatSync:
             text += f"{author}{msg_text}\n\n"
             last_message_author_id = i.message.author_id
             last_by_bot = i.message.by_bot
+            last_badge = i.message.badge
+            if not i.message.text:
+                try:
 
-        try:
-            self.current_bot.send_message(self.settings["chat_id"], text, message_thread_id=thread_id)
-            self.swap_curr_bot()
-        except:
-            logger.error(f"{LOGGER_PREFIX} Произошла ошибка при отправке сообщения в Telegram чат.")
-            logger.debug("TRACEBACK", exc_info=True)
+                    text = f"<a href=\"{message_text}\">{SPECIAL_SYMBOL}</a>" + text
+                    self.current_bot.send_message(self.settings["chat_id"], text.rstrip()+tags, message_thread_id=thread_id)
+                    self.swap_curr_bot()
+                    text = ""                
+
+                except:
+                    logger.error(f"{LOGGER_PREFIX} Произошла ошибка при отправке сообщения в Telegram чат.")
+                    logger.debug("TRACEBACK", exc_info=True)
+        if text:
+            try:
+                self.current_bot.send_message(self.settings["chat_id"], text.rstrip()+tags, message_thread_id=thread_id)
+                self.swap_curr_bot()
+            except:
+                logger.error(f"{LOGGER_PREFIX} Произошла ошибка при отправке сообщения в Telegram чат.")
+                logger.debug("TRACEBACK", exc_info=True)
 
     def ingoing_message_handler(self, c: Cardinal, e: events.NewMessageEvent):
         if not self.ready:
@@ -342,7 +434,7 @@ class ChatSync:
             if str(i) in self.threads:
                 continue
             self.new_synced_chat(chat.id, chat.name)
-            time.sleep(1)
+            time.sleep(BOT_DELAY / len(self.bots))
         self.sync_chats_running = False
 
     def sync_chat_on_start_handler(self, c: Cardinal, e: events.InitialChatEvent):
@@ -505,7 +597,7 @@ class ChatSync:
             obj = chats[chat]
             if str(chat) not in self.threads:
                 self.new_synced_chat(obj.id, obj.name)
-            time.sleep(1)
+            time.sleep(BOT_DELAY / len(self.bots))
         self.sync_chats_running = False
 
     def send_message(self, m: telebot.types.Message):
@@ -569,16 +661,19 @@ class ChatSync:
         text = ""
         last_message_author_id = -1
         last_by_bot = False
+        last_badge = None
         for i in history:
             message_text = str(i)
-            if i.author_id == last_message_author_id and i.by_bot == last_by_bot:
+            if i.author_id == last_message_author_id and i.by_bot == last_by_bot and i.badge == last_badge:
                 author = ""
             elif i.author_id == self.cardinal.account.id:
                 author = f"<i><b>🤖 {_('you')} (<i>FPC</i>):</b></i> " if i.by_bot else f"<i><b>🫵 {_('you')}:</b></i> "
+                if i.badge:
+                    author = f"<i><b>📦 {_('you')} ({i.badge}):</b></i> "
             elif i.author_id == 0:
                 author = f"<i><b>🔵 {i.author}: </b></i>"
             elif i.badge:
-                author = f"<i><b>🆘 {i.author} ({_('support')}): </b></i>"
+                author = f"<i><b>🆘 {i.author} ({i.badge}): </b></i>"
             elif i.author == i.chat_name:
                 author = f"<i><b>👤 {i.author}: </b></i>"
             else:
@@ -594,6 +689,7 @@ class ChatSync:
             text += f"{author}{msg_text}\n\n"
             last_message_author_id = i.author_id
             last_by_bot = i.by_bot
+            last_badge = i.badge
 
         self.tgbot.reply_to(m, text)
 
@@ -601,9 +697,13 @@ class ChatSync:
         Thread(target=self.history, args=(m,)).start()
 
     def send_funpay_image(self, m: telebot.types.Message):
-        if not self.settings["chat_id"] or m.chat.id != self.settings["chat_id"] or not m.reply_to_message or not m.reply_to_message.forum_topic_created:
-            return
 
+        if not self.settings["chat_id"] or m.chat.id != self.settings["chat_id"] or not m.reply_to_message or not m.reply_to_message.forum_topic_created:
+
+            return
+        if m.caption is not None:
+            m.text = m.caption
+            self.send_message (m)
         photo = m.photo[-1]
         if photo.file_size >= 20971520:
             self.tgbot.reply_to(m, "❌ Размер файла не должен превышать 20МБ.")
@@ -615,8 +715,13 @@ class ChatSync:
         try:
             file_info = self.tgbot.get_file(photo.file_id)
             file = self.tgbot.download_file(file_info.file_path)
+            while self.settings.get ("can_send_mess", True) == False:
+                time.sleep(0.5)
+            self.settings["can_send_mess"] = False
             result = self.cardinal.account.send_image(chat_id, file, username, True,
                                                       update_last_saved_message=self.cardinal.old_mode_enabled)
+            time.sleep(2)
+            self.settings["can_send_mess"] = True
             if not result:
                 self.current_bot.reply_to(m, _("msg_sending_error", chat_id, username),
                                           message_thread_id=m.message_thread_id)
@@ -625,6 +730,105 @@ class ChatSync:
             self.current_bot.reply_to(m, _("msg_sending_error", chat_id, username),
                                       message_thread_id=m.message_thread_id)
             return
+
+    # full history
+    def get_full_chat_history(self, chat_id: int, interlocutor_username: str) -> list[FunPayAPI.types.Message]:
+        total_history = []
+        last_message_id = 999999999999999999999999999999999999999999999999999999999
+
+        while True:
+            history = self.cardinal.account.get_chat_history(chat_id, last_message_id, interlocutor_username)
+            if not history:
+                break
+            temp_last_message_id = history[0].id
+            if temp_last_message_id == last_message_id:
+                break
+            last_message_id = temp_last_message_id
+            total_history = history + total_history
+            time.sleep(0.2)
+        return total_history
+
+    def create_chat_history_messages(self, messages: list[FunPayAPI.types.Message]) -> list[str]:
+        result = []
+        while messages:
+            text = ""
+            last_message_author_id = -1
+            last_by_bot = False
+            last_badge = None
+            while messages:
+                i = messages[0]
+                del messages[0]
+                message_text = str(i)
+                if i.author_id == last_message_author_id and i.by_bot == last_by_bot and i.badge == last_badge:
+                    author = ""
+                elif i.author_id == self.cardinal.account.id:
+                    author = f"<i><b>🤖 {_('you')} (<i>FPC</i>):</b></i> " if i.by_bot else f"<i><b>🫵 {_('you')}:</b></i> "
+                    if i.badge:
+                        author = f"<i><b>📦 {_('you')} ({i.badge}):</b></i> "
+                elif i.author_id == 0:
+                    author = f"<i><b>🔵 {i.author}: </b></i>"
+                elif i.badge:
+                    author = f"<i><b>🆘 {i.author} ({i.message.badge}): </b></i>"
+                elif i.author == i.chat_name:
+                    author = f"<i><b>👤 {i.author}: </b></i>"
+                else:
+                    author = f"<i><b>🆘 {i.author} {_('support')}: </b></i>"
+
+                if not i.text:
+                    msg_text = f"<a href=\"{message_text}\">{_('photo')}</a>"
+                elif i.author_id == 0:
+                    msg_text = f"<b><i>{utils.escape(message_text)}</i></b>"
+                else:
+                    msg_text = utils.escape(message_text)
+
+                text += f"{author}{msg_text}\n\n"
+                last_message_author_id = i.author_id
+                last_by_bot = i.by_bot
+                last_badge = i.badge
+                if messages and len(text+str(messages[0])) + 50 > 4096:
+                    break
+            result.append(text)
+
+        return result
+
+    def full_history(self, m: telebot.types.Message):
+        if not m.chat.id == self.settings.get("chat_id") or not m.reply_to_message or not m.reply_to_message.forum_topic_created:
+            self.tgbot.reply_to(m, "❌ Данную команду необходимо вводить в одном из синк-чатов!")
+            return
+
+        if self.full_history_running:
+            self.tgbot.reply_to(m, "❌ Получение истории чата уже запущено! Дождитесь окончания процесса или перезапустите <i>FPC</i>.")
+            return
+
+        self.full_history_running = True
+        tg_chat_name = m.reply_to_message.forum_topic_created.name
+        *username, chat_id = tg_chat_name.split()
+        chat_id = int(chat_id.replace("(", "").replace(")", ""))
+
+        self.tgbot.reply_to(m, f"Начинаю изучение истории чата <a href=\"https://funpay.com/chat/?node={chat_id}\">{username}</a>...\nЭто может занять некоторое время.")
+        try:
+            history = self.get_full_chat_history(chat_id, username)
+            messages = self.create_chat_history_messages(history)
+        except:
+            self.full_history_running = False
+            self.tgbot.reply_to(m, f"❌ Произошла ошибка при получении истории чата <a href=\"https://funpay.com/chat/?node={chat_id}\">{username}</a>.")
+            logger.debug("TRACEBACK", exc_info=True)
+            return
+
+        for i in messages:
+            try:
+                self.current_bot.send_message(m.chat.id, i, message_thread_id=m.message_thread_id)
+                self.swap_curr_bot()
+            except:
+                logger.error(f"{LOGGER_PREFIX} Произошла ошибка при отправки сообщения в Telegram топик.")
+                logger.debug("TRACEBACK", exc_info=True)
+            time.sleep(BOT_DELAY / len(self.bots))
+
+        self.full_history_running = False
+        self.tgbot.reply_to(m, f"✅ Готово!")
+
+    def full_history_handler(self, m: telebot.types.Message):
+        Thread(target=self.full_history, args=(m,)).start()
 
 
 def main(c: Cardinal):

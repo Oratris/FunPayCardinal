@@ -116,7 +116,6 @@ class Account:
         headers["cookie"] += f"; PHPSESSID={self.phpsessid}" if self.phpsessid and not exclude_phpsessid else ""
         if self.user_agent:
             headers["user-agent"] = self.user_agent
-        print(self.phpsessid)
         link = api_method if api_method.startswith("https://funpay.com") else "https://funpay.com/" + api_method
         response = getattr(requests, request_method)(link, headers=headers, data=payload, timeout=self.requests_timeout,
                                                      proxies=self.proxy or {})
@@ -217,7 +216,7 @@ class Account:
             result.append(lot_obj)
         return result
 
-    def get_balance(self, lot_id: int = 18853876) -> types.Balance:
+    def get_balance(self, lot_id: int = 20978354) -> types.Balance:
         """
         Получает информацию о балансе пользователя.
 
@@ -448,7 +447,7 @@ class Account:
             raise exceptions.MessageNotDeliveredError(response, error_text, chat_id)
 
         mes = json_response["objects"][0]["data"]["messages"][-1]
-        parser = BeautifulSoup(mes["html"], "html.parser")
+        parser = BeautifulSoup(mes["html"].replace("<br>", "\n"), "html.parser")
         try:
             if image_link := parser.find("a", {"class": "chat-img-link"}):
                 image_link = image_link.get("href")
@@ -582,7 +581,7 @@ class Account:
         Оформляет возврат средств за заказ.
 
         :param order_id: ID заказа.
-        :type order_id: :obj:`str`r
+        :type order_id: :obj:`str`
         """
         if not self.is_initiated:
             raise exceptions.AccountNotInitiatedError()
@@ -743,9 +742,9 @@ class Account:
             return True
         elif json_response.get("error") and json_response.get("msg") and "Подождите" in json_response.get("msg"):
             wait_time = utils.parse_wait_time(json_response.get("msg"))
-            raise exceptions.RaiseError(response, category, json_response.get("MSG"), wait_time)
+            raise exceptions.RaiseError(response, category, json_response.get("msg"), wait_time)
         else:
-            raise exceptions.RaiseError(response, category, None, None)
+            raise exceptions.RaiseError(response, category, json_response.get("msg"), None)
 
     def get_user(self, user_id: int) -> types.UserProfile:
         """
@@ -869,6 +868,7 @@ class Account:
         short_description = None
         full_description = None
         sum_ = None
+        currency = "?"
         subcategory = None
         for div in parser.find_all("div", {"class": "param-item"}):
             if not (h := div.find("h5")):
@@ -878,8 +878,9 @@ class Account:
             elif h.text == "Подробное описание":
                 full_description = div.find("div").text
             elif h.text == "Сумма":
-                sum_ = float(div.find("span").text)
-            elif h.text == "Категория":
+                sum_ = float(div.find("span").text.replace(" ", ""))
+                currency = div.find("strong").text
+            elif h.text in ("Категория", "Валюта"):
                 subcategory_link = div.find("a").get("href")
                 subcategory_split = subcategory_link.split("/")
                 subcategory_id = int(subcategory_split[-2])
@@ -917,7 +918,7 @@ class Account:
         else:
             review = types.Review(stars, text, reply, False, str(reply_obj), order_id, buyer_username, buyer_id)
 
-        order = types.Order(order_id, status, subcategory, short_description, full_description, sum_,
+        order = types.Order(order_id, status, subcategory, short_description, full_description, sum_, currency,
                             buyer_id, buyer_username, seller_id, seller_username, html_response, review)
         return order
 
@@ -1027,7 +1028,10 @@ class Account:
                 continue
 
             description = div.find("div", {"class": "order-desc"}).find("div").text
-            price = float(div.find("div", {"class": "tc-price"}).text.split(" ")[0])
+            tc_price = div.find("div", {"class": "tc-price"}).text
+            tc_price = tc_price.replace(" ", "")
+            price = float(tc_price[:-1])
+            currency = tc_price[-1]
 
             buyer_div = div.find("div", {"class": "media-user-name"}).find("span")
             buyer_username = buyer_div.text
@@ -1056,7 +1060,7 @@ class Account:
                 h, m = split[1].split(":")
                 order_date = datetime(year, month, day, int(h), int(m))
 
-            order_obj = types.OrderShortcut(order_id, description, price, buyer_username, buyer_id, order_status,
+            order_obj = types.OrderShortcut(order_id, description, price, currency, buyer_username, buyer_id, order_status,
                                             order_date, subcategory_name, str(div))
             sells.append(order_obj)
 
@@ -1196,15 +1200,11 @@ class Account:
         """
         if not self.is_initiated:
             raise exceptions.AccountNotInitiatedError()
-        headers = {
-            "accept": "*/*",
-            "content-type": "application/json",
-            "x-requested-with": "XMLHttpRequest",
-        }
+        headers = {}
         response = self.method("get", f"lots/offerEdit?offer={lot_id}", headers, {}, raise_not_200=True)
 
-        json_response = response.json()
-        bs = BeautifulSoup(json_response["html"], "html.parser")
+        html_response = response.content.decode()
+        bs = BeautifulSoup(html_response, "html.parser")
 
         result = {"active": "", "deactivate_after_sale": ""}
         result.update({field["name"]: field.get("value") or "" for field in bs.find_all("input")
@@ -1372,12 +1372,12 @@ class Account:
             if i["id"] < from_id:
                 continue
             author_id = i["author"]
-            parser = BeautifulSoup(i["html"], "html.parser")
+            parser = BeautifulSoup(i["html"].replace("<br>", "\n"), "html.parser")
 
             # Если ник или бейдж написавшего неизвестен, но есть блок с данными об авторе сообщения
             if None in [ids.get(author_id), badges.get(author_id)] and (author_div := parser.find("div", {"class": "media-user-name"})):
                 if badges.get(author_id) is None:
-                    badge = author_div.find("span")
+                    badge = author_div.find("span", {"class": "chat-msg-author-label label label-success"})
                     badges[author_id] = badge.text if badge else 0
                 if ids.get(author_id) is None:
                     author = author_div.find("a").text.strip()
@@ -1411,6 +1411,10 @@ class Account:
             i.author = ids.get(i.author_id)
             i.chat_name = interlocutor_username
             i.badge = badges.get(i.author_id) if badges.get(i.author_id) != 0 else None
+            parser = BeautifulSoup(i.html, "html.parser")
+            default_label = parser.find("div", {"class": "media-user-name"})
+            default_label = default_label.find("span", {"class": "chat-msg-author-label label label-default"}) if default_label else None
+            i.badge = default_label.text if (i.badge is None and default_label is not None) else i.badge
         return messages
 
     @staticmethod

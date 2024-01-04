@@ -10,20 +10,20 @@ from colorama import Fore, Style
 
 default_config = {
     "FunPay": {
-        "golden_key": "mrtte4vdsicqu2h17m0h924jaz6698sq",
-        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36",
+        "golden_key": "",
+        "user_agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
         "autoRaise": "0",
         "autoResponse": "0",
-        "autoDelivery": "1",
+        "autoDelivery": "0",
         "multiDelivery": "0",
         "autoRestore": "0",
-        "autoDisable": "1",
+        "autoDisable": "0",
         "oldMsgGetMode": "0"
     },
     "Telegram": {
-        "enabled": "",
+        "enabled": "0",
         "token": "",
-        "secretKey": ""
+        "secretKey": "СекретныйПароль"
     },
 
     "BlockList": {
@@ -74,12 +74,12 @@ default_config = {
         "port": "",
         "login": "",
         "password": "",
-        "check": "1"
+        "check": "0"
     },
 
     "Other": {
         "watermark": "",
-        "requestsDelay": "2",
+        "requestsDelay": "4",
         "language": "ru"
     }
 }
@@ -178,4 +178,3 @@ def first_setup():
           f"Все остальное ты сможешь настроить через него. {Fore.RED}ʕ•ᴥ•ʔ{Style.RESET_ALL}")
     with open("configs/_main.cfg", "w", encoding="utf-8") as f:
         config.write(f)
-first_setup()

